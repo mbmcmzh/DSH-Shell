@@ -13,7 +13,9 @@ namespace DSHShell
         [STAThread]
         private static int Main(string[] args)
         {
-            using (var mutex = new Mutex(true, SingleInstanceMutexName, out bool createdNew))
+            var selfTest = Array.IndexOf(args, "--test-quit-after") >= 0;
+            var instanceSuffix = selfTest ? ".SelfTest." + Environment.ProcessId : string.Empty;
+            using (var mutex = new Mutex(true, SingleInstanceMutexName + instanceSuffix, out bool createdNew))
             {
                 if (!createdNew)
                 {
@@ -31,7 +33,7 @@ namespace DSHShell
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
-                using (var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName))
+                using (var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName + instanceSuffix))
                 {
                     var form = new MainForm(args);
 

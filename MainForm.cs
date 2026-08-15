@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -16,13 +15,10 @@ namespace DSHShell
         // ---- 窗口消息 ----
         private const int WM_NCCALCSIZE = 0x0083;
         private const int WM_NCHITTEST = 0x0084;
-        private const int WM_NCMOUSEMOVE = 0x00A0;
         private const int WM_NCLBUTTONDOWN = 0x00A1;
         private const int WM_NCLBUTTONUP = 0x00A2;
         private const int WM_NCLBUTTONDBLCLK = 0x00A3;
         private const int WM_LBUTTONUP = 0x0202;
-        private const int WM_MOUSEMOVE = 0x0200;
-        private const int WM_NCMOUSELEAVE = 0x02A2;
 
         // ---- 命中测试码 ----
         private const int HTNOWHERE = 0;
@@ -38,9 +34,6 @@ namespace DSHShell
         private const int SM_CYSIZEFRAME = 33;
         private const int SM_CXPADDEDBORDER = 92;
 
-        private const int TME_LEAVE = 0x0002;
-        private const int TME_NONCLIENT = 0x0010;
-
         private const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004, SWP_FRAMECHANGED = 0x0020;
 
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
@@ -50,26 +43,12 @@ namespace DSHShell
         // ---- 标题栏尺寸（逻辑像素，Windows 11 标准：栏高 32，按钮 46×32）----
         private const int TitleBarDip = 32;
         private const int CaptionButtonDip = 46;
-        private const int GlyphSizeDip = 10;
         private const int ResizeBorderDip = 6;
         private const int ResizeCornerDip = 14;
 
         // DSW 设计令牌（浅色/深色），与 dsh-web 的 design-platform.css 对齐
         private static readonly Color LightBg = Color.FromArgb(255, 255, 255);          // --dsw-static-neutral-bluish-00
         private static readonly Color DarkBg = Color.FromArgb(21, 21, 23);              // --dsw-static-neutral-bluish-950
-        // 标题栏字形：活动窗口用近黑/近白，非活动窗口变淡（与系统标题栏一致）
-        private static readonly Color LightGlyph = Color.FromArgb(26, 26, 26);
-        private static readonly Color DarkGlyph = Color.FromArgb(232, 234, 237);
-        private static readonly Color LightGlyphIdle = Color.FromArgb(140, 143, 148);
-        private static readonly Color DarkGlyphIdle = Color.FromArgb(118, 122, 127);
-        // 悬停/按下叠加色（半透明，直接叠在页面底色上）
-        private static readonly Color LightHover = Color.FromArgb(20, 0, 0, 0);
-        private static readonly Color LightPress = Color.FromArgb(38, 0, 0, 0);
-        private static readonly Color DarkHover = Color.FromArgb(24, 255, 255, 255);
-        private static readonly Color DarkPress = Color.FromArgb(40, 255, 255, 255);
-        private static readonly Color CloseHover = Color.FromArgb(196, 43, 28);         // Windows 11 关闭红 #C42B1C
-        private static readonly Color ClosePress = Color.FromArgb(176, 39, 25);
-
         private string WebUrl => $"http://127.0.0.1:{_server.Port}/";
         private const string AppTitle = "DeepSeek Harness";
 
@@ -83,33 +62,17 @@ namespace DSHShell
         private bool _reallyExit;
         private bool _dark;
 
-        // 标题栏交互状态
-        private Font _glyphFont;
-        private int _hotButton = HTNOWHERE;
+        // WebView2 非客户区不可用时，顶层窗口命中测试仍可处理三个按钮。
         private int _pressedButton = HTNOWHERE;
-        private bool _ncTracking;
-        private bool _windowActive = true;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct TRACKMOUSEEVENT
-        {
-            public int cbSize;
-            public int dwFlags;
-            public IntPtr hwndTrack;
-            public int dwHoverTime;
-        }
 
         [DllImport("user32.dll")]
         private static extern bool IsZoomed(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int index);
-
-        [DllImport("user32.dll")]
-        private static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
 
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, int flags);
@@ -128,10 +91,6 @@ namespace DSHShell
             MinimumSize = new Size(840, 560);
             BackColor = LightBg;
             DoubleBuffered = true;
-
-            // 客户区顶部让出一条标题栏；网页与启动画面都排在它下面（Dock 会尊重 Padding）
-            Padding = new Padding(0, TitleBarHeight, 0, 0);
-            _glyphFont = CreateGlyphFont();
 
             _webView.DefaultBackgroundColor = LightBg;
             Controls.Add(_webView);
@@ -234,14 +193,27 @@ namespace DSHShell
 
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+            try { _webView.CoreWebView2.Settings.IsNonClientRegionSupportEnabled = true; }
+            catch { } // 较老的 WebView2 Runtime 不支持 app-region，窗口按钮仍可正常使用。
 
             // 页面主题桥：跟随 body[data-ds-dark-theme] 切换悬浮按钮/拖拽条配色
             _webView.WebMessageReceived += (sender, args) =>
             {
-                try { ApplyTheme(args.TryGetWebMessageAsString() == "dark"); }
+                try
+                {
+                    switch (args.TryGetWebMessageAsString())
+                    {
+                        case "dark": ApplyTheme(true); break;
+                        case "light": ApplyTheme(false); break;
+                        case "chrome:minimize": WindowState = FormWindowState.Minimized; break;
+                        case "chrome:maximize": ToggleMaximize(); break;
+                        case "chrome:close": Close(); break;
+                    }
+                }
                 catch { }
             };
             await _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ThemeBridgeScript);
+            await _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(DesktopChromeScript);
 
             // 页面里的外部链接（如搜索来源）交给系统默认浏览器打开，不抢当前窗口。
             _webView.CoreWebView2.NewWindowRequested += (sender, args) =>
@@ -251,7 +223,11 @@ namespace DSHShell
                 catch { }
             };
 
-            _webView.NavigationCompleted += (sender, args) => HideSplash();
+            _webView.NavigationCompleted += (sender, args) =>
+            {
+                HideSplash();
+                PublishWindowState();
+            };
 
             _webView.Source = new Uri(WebUrl);
         }
@@ -275,16 +251,180 @@ namespace DSHShell
       }
     } catch {}
   }
-  send()
-  try {
-    new MutationObserver(send).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
-  } catch {}
+  const install = () => {
+    send()
+    try {
+      new MutationObserver(send).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+    } catch {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, { once: true })
+  else install()
 })()";
 
-        // ---------- 窗口骨架：原生框架 + 自绘标题栏 ----------
+        // 仅注入桌面壳中的 WebView：页面表面铺到顶边，内容避开拖拽带与右上角窗口按钮。
+        // 不依赖 DSH 的类名或构建产物，只使用槽渲染器稳定的 data-slot 锚点。
+        private const string DesktopChromeScript = @"
+(() => {
+  const titleBar = 32
+  const captionButtons = 138
+  let sidebar = null
+  let sidebarClass = ''
+  let header = null
+  let headerClass = ''
+  let resizeObserver = null
+
+  const resetInset = (element, property) => {
+    element.style.removeProperty(property)
+    const value = Number.parseFloat(getComputedStyle(element).getPropertyValue(property)) || 0
+    element.style.setProperty(property, `${value + titleBar}px`)
+  }
+
+  const adjust = () => {
+    const nextSidebar = document.querySelector('[data-slot=""sidebar""]')?.firstElementChild ?? null
+    const nextSidebarClass = nextSidebar?.className ?? ''
+    if (nextSidebar instanceof HTMLElement && (nextSidebar !== sidebar || nextSidebarClass !== sidebarClass)) {
+      sidebar = nextSidebar
+      sidebarClass = nextSidebarClass
+      resetInset(sidebar, 'padding-top')
+    }
+
+    const nextHeader = document.querySelector('[data-slot=""conversation.session.header""] header')
+      ?? document.querySelector('[data-slot=""conversation.session.header""]')?.firstElementChild
+      ?? null
+    const nextHeaderClass = nextHeader?.className ?? ''
+    if (nextHeader instanceof HTMLElement && (nextHeader !== header || nextHeaderClass !== headerClass)) {
+      resizeObserver?.disconnect()
+      header = nextHeader
+      headerClass = nextHeaderClass
+      resetInset(header, 'padding-top')
+      resizeObserver = new ResizeObserver(adjustHeaderRight)
+      resizeObserver.observe(header)
+    }
+    adjustHeaderRight()
+  }
+
+  const adjustHeaderRight = () => {
+    if (!(header instanceof HTMLElement)) return
+    header.style.removeProperty('padding-right')
+    const base = Number.parseFloat(getComputedStyle(header).paddingRight) || 0
+    const overlap = Math.max(0, header.getBoundingClientRect().right - (innerWidth - captionButtons))
+    header.style.paddingRight = `${base + overlap}px`
+  }
+
+  const install = () => {
+    if (document.getElementById('dsh-shell-drag-region')) return
+    document.documentElement.setAttribute('data-dsh-desktop-shell', '')
+
+    const style = document.createElement('style')
+    style.textContent = `
+      #dsh-shell-caption-controls {
+        position: fixed;
+        z-index: 2147483647;
+        top: 0;
+        right: 0;
+        display: grid;
+        grid-template-columns: repeat(3, 46px);
+        width: 138px;
+        height: 32px;
+        color: var(--dsw-alias-label-primary, #1a1a1a);
+        background: var(--dsw-alias-bg-base, #fff);
+        app-region: no-drag;
+        -webkit-app-region: no-drag;
+      }
+      #dsh-shell-caption-controls button {
+        display: grid;
+        place-items: center;
+        width: 46px;
+        height: 32px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        color: inherit;
+        background: transparent;
+        font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets';
+        font-size: 10px;
+        line-height: 1;
+      }
+      #dsh-shell-caption-controls button:hover { background: rgb(0 0 0 / 8%); }
+      #dsh-shell-caption-controls button:active { background: rgb(0 0 0 / 15%); }
+      html:has(body[data-ds-dark-theme]) #dsh-shell-caption-controls button:hover {
+        background: rgb(255 255 255 / 10%);
+      }
+      html:has(body[data-ds-dark-theme]) #dsh-shell-caption-controls button:active {
+        background: rgb(255 255 255 / 16%);
+      }
+      #dsh-shell-caption-controls button[data-action='close']:hover { color: #fff; background: #c42b1c; }
+      #dsh-shell-caption-controls button[data-action='close']:active { color: #fff; background: #b02719; }
+    `
+    document.head.append(style)
+
+    const controls = document.createElement('div')
+    controls.id = 'dsh-shell-caption-controls'
+    const definitions = [
+      ['minimize', '\uE921', '最小化'],
+      ['maximize', '\uE922', '最大化'],
+      ['close', '\uE8BB', '关闭'],
+    ]
+    for (const [action, glyph, label] of definitions) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.dataset.action = action
+      button.setAttribute('aria-label', label)
+      button.title = label
+      button.textContent = glyph
+      button.addEventListener('click', () => {
+        try { window.chrome.webview.postMessage(`chrome:${action}`) } catch {}
+      })
+      button.addEventListener('dblclick', event => { event.preventDefault(); event.stopPropagation() })
+      controls.append(button)
+    }
+    window.chrome?.webview?.addEventListener('message', event => {
+      if (event.data !== 'chrome:maximized' && event.data !== 'chrome:restored') return
+      const maximize = controls.querySelector('[data-action=""maximize""]')
+      if (!(maximize instanceof HTMLButtonElement)) return
+      const maximized = event.data === 'chrome:maximized'
+      maximize.textContent = maximized ? '\uE923' : '\uE922'
+      maximize.setAttribute('aria-label', maximized ? '还原' : '最大化')
+      maximize.title = maximized ? '还原' : '最大化'
+    })
+    document.body.append(controls)
+
+    const dragRegion = document.createElement('div')
+    dragRegion.id = 'dsh-shell-drag-region'
+    dragRegion.setAttribute('aria-hidden', 'true')
+    Object.assign(dragRegion.style, {
+      position: 'fixed',
+      zIndex: '2147483646',
+      top: '0',
+      left: '0',
+      right: `${captionButtons}px`,
+      height: `${titleBar}px`,
+      background: 'transparent',
+      userSelect: 'none',
+    })
+    dragRegion.style.setProperty('app-region', 'drag')
+    dragRegion.style.setProperty('-webkit-app-region', 'drag')
+    document.body.append(dragRegion)
+
+    new MutationObserver(adjust).observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class'],
+    })
+    window.addEventListener('resize', adjustHeaderRight)
+    adjust()
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, { once: true })
+  else install()
+})()";
+
+        // ---------- 窗口骨架：原生框架 + WebView 标题栏 ----------
         //
         // 做法与 Edge / VS Code 一致：保留系统窗口框架（WS_CAPTION/THICKFRAME/SYSMENU 都在），
-        // 只在 WM_NCCALCSIZE 里把客户区顶边扩展到窗口顶边，把标题栏“借”过来自己画。
+        // 只在 WM_NCCALCSIZE 里把客户区顶边扩展到窗口顶边，标题栏由 WebView 注入层呈现。
         // 这样原生阴影、Windows 11 平滑圆角、贴靠布局、系统菜单、双击最大化全部保留。
 
         private int Dip(int value) => (int)Math.Round(value * DeviceDpi / 96.0);
@@ -295,7 +435,6 @@ namespace DSHShell
         /// <summary>最大化时窗口会外溢一圈边框厚度，客户区顶边要补回来，否则标题栏被切掉。</summary>
         private int FrameThickness => GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
 
-        private Rectangle CaptionBarRect => new Rectangle(0, 0, ClientSize.Width, TitleBarHeight);
         private Rectangle CloseButtonRect => CaptionButtonAt(0);
         private Rectangle MaxButtonRect => CaptionButtonAt(1);
         private Rectangle MinButtonRect => CaptionButtonAt(2);
@@ -310,25 +449,9 @@ namespace DSHShell
         private static bool IsCaptionButton(int hit) =>
             hit == HTMINBUTTON || hit == HTMAXBUTTON || hit == HTCLOSE;
 
-        /// <summary>标题栏字形用系统自带的图标字体，和真正的 Windows 标题栏逐像素一致。</summary>
-        private Font CreateGlyphFont()
-        {
-            foreach (var name in new[] { "Segoe Fluent Icons", "Segoe MDL2 Assets" })
-            {
-                try
-                {
-                    using (new FontFamily(name)) { }   // 字体不存在会抛异常
-                    return new Font(name, Dip(GlyphSizeDip), GraphicsUnit.Pixel);
-                }
-                catch { }
-            }
-            return null;   // 两个都没有时退回手绘（见 DrawFallbackGlyph）
-        }
-
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Padding = new Padding(0, TitleBarHeight, 0, 0);
             TrySetDwmAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
             ApplyTheme(_dark);
             // 让系统按新的 WM_NCCALCSIZE 结果重算一次窗口框架
@@ -351,12 +474,6 @@ namespace DSHShell
             try { _webView.DefaultBackgroundColor = bg; }
             catch { }
             TrySetDwmAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE, dark ? 1 : 0);   // 窗口描边跟着换深浅
-            InvalidateCaption();
-        }
-
-        private void InvalidateCaption()
-        {
-            if (IsHandleCreated) Invalidate(CaptionBarRect, false);
         }
 
         private void ToggleMaximize()
@@ -369,23 +486,17 @@ namespace DSHShell
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            InvalidateCaption();   // 按钮靠右、最大化/还原字形会变，尺寸一变就重画
+            PublishWindowState();
         }
 
-        protected override void OnActivated(EventArgs e)
+        private void PublishWindowState()
         {
-            base.OnActivated(e);
-            _windowActive = true;
-            InvalidateCaption();
-        }
-
-        protected override void OnDeactivate(EventArgs e)
-        {
-            base.OnDeactivate(e);
-            _windowActive = false;
-            _pressedButton = HTNOWHERE;
-            _hotButton = HTNOWHERE;
-            InvalidateCaption();
+            try
+            {
+                _webView.CoreWebView2?.PostWebMessageAsString(
+                    WindowState == FormWindowState.Maximized ? "chrome:maximized" : "chrome:restored");
+            }
+            catch { }
         }
 
         // ---------- 标题栏：消息处理 ----------
@@ -440,29 +551,13 @@ namespace DSHShell
                     return;
                 }
 
-                case WM_NCMOUSEMOVE:
-                    SetHotButton((int)m.WParam);
-                    TrackNcMouseLeave();
-                    break;   // 继续交给系统：贴靠布局浮层依赖它
-
-                case WM_NCMOUSELEAVE:
-                    _ncTracking = false;
-                    SetHotButton(HTNOWHERE);
-                    break;
-
-                case WM_MOUSEMOVE:
-                    SetHotButton(HTNOWHERE);
-                    break;
-
                 case WM_NCLBUTTONDOWN:
                 case WM_NCLBUTTONDBLCLK:
                     if (IsCaptionButton((int)m.WParam))
                     {
                         _pressedButton = (int)m.WParam;
-                        _hotButton = _pressedButton;
-                        InvalidateCaption();
                         m.Result = IntPtr.Zero;
-                        return;   // 自己管按下态，避免和系统默认绘制打架
+                        return;
                     }
                     break;
 
@@ -472,7 +567,6 @@ namespace DSHShell
                         var hit = (int)m.WParam;
                         var wasPressed = _pressedButton;
                         _pressedButton = HTNOWHERE;
-                        InvalidateCaption();
                         m.Result = IntPtr.Zero;
                         if (wasPressed == hit) InvokeCaptionAction(hit);
                         return;
@@ -484,34 +578,11 @@ namespace DSHShell
                     if (_pressedButton != HTNOWHERE)
                     {
                         _pressedButton = HTNOWHERE;
-                        InvalidateCaption();
                     }
                     break;
             }
 
             base.WndProc(ref m);
-        }
-
-        private void SetHotButton(int hit)
-        {
-            if (!IsCaptionButton(hit)) hit = HTNOWHERE;
-            if (_hotButton == hit) return;
-            _hotButton = hit;
-            InvalidateCaption();
-        }
-
-        /// <summary>订阅一次 WM_NCMOUSELEAVE，指针离开标题栏时才能清掉悬停高亮。</summary>
-        private void TrackNcMouseLeave()
-        {
-            if (_ncTracking || !IsHandleCreated) return;
-            var tme = new TRACKMOUSEEVENT
-            {
-                cbSize = Marshal.SizeOf<TRACKMOUSEEVENT>(),
-                dwFlags = TME_LEAVE | TME_NONCLIENT,
-                hwndTrack = Handle,
-                dwHoverTime = 0
-            };
-            _ncTracking = TrackMouseEvent(ref tme);
         }
 
         private void InvokeCaptionAction(int hit)
@@ -749,97 +820,5 @@ namespace DSHShell
             }
         }
 
-        // ---------- 标题栏：绘制 ----------
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            if (!e.ClipRectangle.IntersectsWith(CaptionBarRect)) return;
-
-            DrawCaptionButton(e.Graphics, MinButtonRect, HTMINBUTTON);
-            DrawCaptionButton(e.Graphics, MaxButtonRect, HTMAXBUTTON);
-            DrawCaptionButton(e.Graphics, CloseButtonRect, HTCLOSE);
-        }
-
-        private void DrawCaptionButton(Graphics g, Rectangle rect, int id)
-        {
-            var pressed = _pressedButton == id && _hotButton == id;
-            var hot = _pressedButton == HTNOWHERE ? _hotButton == id : pressed;
-
-            // Windows 11 规格：整块方形填充、贴边无间隙、关闭键悬停变红
-            if (pressed || hot)
-            {
-                Color fill;
-                if (id == HTCLOSE) fill = pressed ? ClosePress : CloseHover;
-                else if (pressed) fill = _dark ? DarkPress : LightPress;
-                else fill = _dark ? DarkHover : LightHover;
-
-                using (var brush = new SolidBrush(fill))
-                    g.FillRectangle(brush, rect);
-            }
-
-            Color glyphColor;
-            if (id == HTCLOSE && (hot || pressed)) glyphColor = Color.White;
-            else if (_windowActive) glyphColor = _dark ? DarkGlyph : LightGlyph;
-            else glyphColor = _dark ? DarkGlyphIdle : LightGlyphIdle;
-
-            if (_glyphFont != null)
-            {
-                // Segoe Fluent Icons 码位：ChromeMinimize / ChromeMaximize / ChromeRestore / ChromeClose
-                var glyph = id == HTMINBUTTON ? ""
-                    : id == HTMAXBUTTON ? (WindowState == FormWindowState.Maximized ? "" : "")
-                    : "";
-                TextRenderer.DrawText(g, glyph, _glyphFont, rect, glyphColor,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
-            }
-            else
-            {
-                DrawFallbackGlyph(g, rect, id, glyphColor);
-            }
-        }
-
-        /// <summary>系统图标字体缺失时的兜底手绘（开抗锯齿，避免斜线发毛）。</summary>
-        private void DrawFallbackGlyph(Graphics g, Rectangle rect, int id, Color color)
-        {
-            var old = g.SmoothingMode;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            var s = Dip(GlyphSizeDip);
-            var cx = rect.X + rect.Width / 2f;
-            var cy = rect.Y + rect.Height / 2f;
-            var r = s / 2f;
-
-            using (var pen = new Pen(color, Math.Max(1f, Dip(1))))
-            {
-                switch (id)
-                {
-                    case HTMINBUTTON:
-                        g.DrawLine(pen, cx - r, cy, cx + r, cy);
-                        break;
-                    case HTMAXBUTTON:
-                        if (WindowState == FormWindowState.Maximized)
-                        {
-                            g.DrawRectangle(pen, cx - r + 2, cy - r, s - 2, s - 2);
-                            g.DrawRectangle(pen, cx - r, cy - r + 2, s - 2, s - 2);
-                        }
-                        else
-                        {
-                            g.DrawRectangle(pen, cx - r, cy - r, s, s);
-                        }
-                        break;
-                    case HTCLOSE:
-                        g.DrawLine(pen, cx - r, cy - r, cx + r, cy + r);
-                        g.DrawLine(pen, cx - r, cy + r, cx + r, cy - r);
-                        break;
-                }
-            }
-            g.SmoothingMode = old;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) _glyphFont?.Dispose();
-            base.Dispose(disposing);
-        }
     }
 }
