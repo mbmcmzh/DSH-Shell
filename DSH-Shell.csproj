@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>DSH</AssemblyName>
+    <RootNamespace>DSHShell</RootNamespace>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <AssemblyTitle>DeepSeek Harness Desktop</AssemblyTitle>
+    <Product>DeepSeek Harness Desktop</Product>
+    <Description>DeepSeek Harness 桌面外壳：双击启动，窗口内使用，托盘常驻。</Description>
+    <Company>DeepSeek Harness</Company>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- 排除项目目录内的辅助工具与产物，避免被误编入或复制进发布目录 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);IconRender\**;publish\**;packages\**;*.ps1</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+</Project>
