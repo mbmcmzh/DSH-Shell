@@ -646,11 +646,6 @@ namespace DSHShell
 
         private void ReallyExit()
         {
-            var msg = _server.StartedByUs
-                ? "确定要退出 DeepSeek Harness 吗？\r\n\r\n本程序启动的后台服务将一并关闭（正在进行的任务会被终止）。"
-                : "确定要退出 DeepSeek Harness 吗？\r\n\r\n（后台服务由其他进程托管，不会被关闭。）";
-            if (MessageBox.Show(this, msg, AppTitle, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
-                return;
             _reallyExit = true;
             Close();
         }

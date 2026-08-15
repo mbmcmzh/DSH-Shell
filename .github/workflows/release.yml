@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+
+      - name: Publish single-file exe
+        run: dotnet publish DSH-Shell.csproj -c Release -o publish
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/DSH.exe
+          generate_release_notes: true
