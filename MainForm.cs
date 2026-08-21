@@ -29,6 +29,8 @@ namespace DSHShell
         private const int HTTOP = 12;
         private const int HTTOPLEFT = 13;
         private const int HTTOPRIGHT = 14;
+        /// <summary>系统不处理这个码，正好拿来当“设置”按钮的自定义命中区。</summary>
+        private const int HTOBJECT = 19;
         private const int HTCLOSE = 20;
 
         private const int SM_CYSIZEFRAME = 33;
@@ -36,24 +38,21 @@ namespace DSHShell
 
         private const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004, SWP_FRAMECHANGED = 0x0020;
 
-        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
-        private const int DWMWCP_ROUND = 2;
-
         // ---- 标题栏尺寸（逻辑像素，Windows 11 标准：栏高 32，按钮 46×32）----
         private const int TitleBarDip = 32;
         private const int CaptionButtonDip = 46;
         private const int ResizeBorderDip = 6;
         private const int ResizeCornerDip = 14;
 
-        // DSW 设计令牌（浅色/深色），与 dsh-web 的 design-platform.css 对齐
-        private static readonly Color LightBg = Color.FromArgb(255, 255, 255);          // --dsw-static-neutral-bluish-00
-        private static readonly Color DarkBg = Color.FromArgb(21, 21, 23);              // --dsw-static-neutral-bluish-950
-        private string WebUrl => $"http://127.0.0.1:{_server.Port}/";
+        /// <summary>右上角按钮个数：设置 ─ ❐ ✕（注入脚本里的 captionButtons 必须与之一致）。</summary>
+        private const int CaptionButtonCount = 4;
+
+        private string WebUrl => $"http://127.0.0.1:{ServerManager.Port}/";
         private const string AppTitle = "DeepSeek Harness";
 
         private readonly string[] _args;
-        private readonly ServerManager _server = new ServerManager();
+        private readonly AppSettings _settings = AppSettings.Load();
+        private readonly ServerManager _server;
         private readonly WebView2 _webView = new WebView2 { Dock = DockStyle.Fill };
         private readonly Panel _splash;
         private readonly Label _splashStatus;
@@ -61,6 +60,10 @@ namespace DSHShell
         private readonly bool _testMode;
         private bool _reallyExit;
         private bool _dark;
+        private bool _settingsOpen;
+
+        /// <summary>用户在设置里改了启动方式并选择立即重启；由 Program 在互斥体释放后拉起新实例。</summary>
+        public bool RestartRequested { get; private set; }
 
         // WebView2 非客户区不可用时，顶层窗口命中测试仍可处理三个按钮。
         private int _pressedButton = HTNOWHERE;
@@ -77,22 +80,20 @@ namespace DSHShell
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, int flags);
 
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(IntPtr hWnd, int attribute, ref int value, int size);
-
         public MainForm(string[] args)
         {
             _args = args;
             _testMode = Array.IndexOf(args, "--test-quit-after") >= 0;
+            _server = new ServerManager(_settings);
             Text = AppTitle;
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
             StartPosition = FormStartPosition.CenterScreen;
             Size = new Size(1280, 840);
             MinimumSize = new Size(840, 560);
-            BackColor = LightBg;
+            BackColor = Theme.LightBg;
             DoubleBuffered = true;
 
-            _webView.DefaultBackgroundColor = LightBg;
+            _webView.DefaultBackgroundColor = Theme.LightBg;
             Controls.Add(_webView);
 
             _splash = BuildSplash(out _splashStatus);
@@ -127,12 +128,21 @@ namespace DSHShell
                     Close();
                     return;
                 }
-                MessageBox.Show(this,
+                // 起不来的常见原因就是 dsh 装在了另一边（Windows / WSL），顺手把设置递到手上
+                var answer = MessageBox.Show(this,
                     "DeepSeek Harness 启动失败：\r\n\r\n" + ex.Message +
-                    "\r\n\r\n日志文件：" + ServerManager.LogFilePath,
-                    AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
-                _reallyExit = true;
-                Close();
+                    "\r\n\r\n日志文件：" + ServerManager.LogFilePath +
+                    "\r\n\r\n当前启动方式：" + (_settings.LaunchMode == LaunchMode.Wsl ? "WSL" : "Windows") +
+                    "。要打开设置换一种方式吗？",
+                    AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Error);
+                if (answer == DialogResult.Yes) OpenSettings();
+
+                // 用户在设置里选了立即重启的话，窗口已经在关了，别再动它
+                if (!RestartRequested && !IsDisposed)
+                {
+                    _reallyExit = true;
+                    Close();
+                }
             }
         }
 
@@ -144,7 +154,9 @@ namespace DSHShell
                 return;
             }
 
-            SetSplash("正在启动后台服务（dsh web）…");
+            SetSplash(_server.Mode == LaunchMode.Wsl
+                ? "正在 WSL 中启动后台服务（dsh web）…"
+                : "正在启动后台服务（dsh web）…");
             _server.Start(ServerManager.LogFilePath);
 
             var sw = Stopwatch.StartNew();
@@ -166,7 +178,12 @@ namespace DSHShell
                     throw new Exception(_server.DescribeEarlyExit());
                 }
                 if (sw.Elapsed > TimeSpan.FromSeconds(120))
-                    throw new Exception("等待后台服务就绪超时（120 秒），请查看日志：" + ServerManager.LogFilePath);
+                    throw new Exception("等待后台服务就绪超时（120 秒）。" +
+                        (_server.Mode == LaunchMode.Wsl
+                            ? "若服务在 WSL 里其实已经起来了，多半是 WSL 的 localhost 转发没生效"
+                              + "（检查 %USERPROFILE%\\.wslconfig 里的 localhostForwarding）。"
+                            : "") +
+                        "\r\n\r\n请查看日志：" + ServerManager.LogFilePath);
                 SetSplash($"正在等待后台服务就绪…（{sw.Elapsed.TotalSeconds:0} 秒）");
                 await Task.Delay(500);
             }
@@ -208,6 +225,7 @@ namespace DSHShell
                         case "chrome:minimize": WindowState = FormWindowState.Minimized; break;
                         case "chrome:maximize": ToggleMaximize(); break;
                         case "chrome:close": Close(); break;
+                        case "chrome:settings": OpenSettings(); break;
                     }
                 }
                 catch { }
@@ -266,7 +284,7 @@ namespace DSHShell
         private const string DesktopChromeScript = @"
 (() => {
   const titleBar = 32
-  const captionButtons = 138
+  const captionButtons = 184
   let sidebar = null
   let sidebarClass = ''
   let header = null
@@ -323,8 +341,8 @@ namespace DSHShell
         top: 0;
         right: 0;
         display: grid;
-        grid-template-columns: repeat(3, 46px);
-        width: 138px;
+        grid-template-columns: repeat(4, 46px);
+        width: 184px;
         height: 32px;
         color: var(--dsw-alias-label-primary, #1a1a1a);
         background: var(--dsw-alias-bg-base, #fff);
@@ -356,12 +374,15 @@ namespace DSHShell
       }
       #dsh-shell-caption-controls button[data-action='close']:hover { color: #fff; background: #c42b1c; }
       #dsh-shell-caption-controls button[data-action='close']:active { color: #fff; background: #b02719; }
+      /* 齿轮笔画比 ─ ❐ ✕ 细，字号给大一点才配得上旁边的窗口按钮 */
+      #dsh-shell-caption-controls button[data-action='settings'] { font-size: 13px; }
     `
     document.head.append(style)
 
     const controls = document.createElement('div')
     controls.id = 'dsh-shell-caption-controls'
     const definitions = [
+      ['settings', '\uE713', '设置'],
       ['minimize', '\uE921', '最小化'],
       ['maximize', '\uE922', '最大化'],
       ['close', '\uE8BB', '关闭'],
@@ -438,8 +459,9 @@ namespace DSHShell
         private Rectangle CloseButtonRect => CaptionButtonAt(0);
         private Rectangle MaxButtonRect => CaptionButtonAt(1);
         private Rectangle MinButtonRect => CaptionButtonAt(2);
+        private Rectangle SettingsButtonRect => CaptionButtonAt(3);
 
-        /// <summary>从右往左第 index 个按钮：0=关闭 1=最大化 2=最小化（即左→右 ─ ❐ ✕）。</summary>
+        /// <summary>从右往左第 index 个按钮：0=关闭 1=最大化 2=最小化 3=设置（即左→右 ⚙ ─ ❐ ✕）。</summary>
         private Rectangle CaptionButtonAt(int index)
         {
             var w = CaptionButtonWidth;
@@ -447,33 +469,27 @@ namespace DSHShell
         }
 
         private static bool IsCaptionButton(int hit) =>
-            hit == HTMINBUTTON || hit == HTMAXBUTTON || hit == HTCLOSE;
+            hit == HTMINBUTTON || hit == HTMAXBUTTON || hit == HTCLOSE || hit == HTOBJECT;
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            TrySetDwmAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+            Theme.ApplyRoundedCorners(Handle);
             ApplyTheme(_dark);
             // 让系统按新的 WM_NCCALCSIZE 结果重算一次窗口框架
             SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         }
 
-        private void TrySetDwmAttribute(int attribute, int value)
-        {
-            if (!IsHandleCreated) return;
-            try { DwmSetWindowAttribute(Handle, attribute, ref value, sizeof(int)); }
-            catch { }   // 老系统不认这些属性，忽略即可
-        }
-
         private void ApplyTheme(bool dark)
         {
             _dark = dark;
-            var bg = dark ? DarkBg : LightBg;
+            var bg = Theme.Bg(dark);
             BackColor = bg;
             try { _webView.DefaultBackgroundColor = bg; }
             catch { }
-            TrySetDwmAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE, dark ? 1 : 0);   // 窗口描边跟着换深浅
+            // 注意别在这里碰 Handle 触发提前建窗：构造期就会调到这个方法
+            if (IsHandleCreated) Theme.ApplyDarkTitleBar(Handle, dark);   // 窗口描边跟着换深浅
         }
 
         private void ToggleMaximize()
@@ -546,6 +562,8 @@ namespace DSHShell
                         if (CloseButtonRect.Contains(pt)) m.Result = (IntPtr)HTCLOSE;
                         else if (MaxButtonRect.Contains(pt)) m.Result = (IntPtr)(MaximizeBox ? HTMAXBUTTON : HTCAPTION);
                         else if (MinButtonRect.Contains(pt)) m.Result = (IntPtr)HTMINBUTTON;
+                        // 设置没有对应的系统命中码，借 HTOBJECT 占位：系统不管它，正好由我们自己处理
+                        else if (SettingsButtonRect.Contains(pt)) m.Result = (IntPtr)HTOBJECT;
                         else m.Result = (IntPtr)HTCAPTION;   // 其余整条都能拖动/双击最大化/右键系统菜单
                     }
                     return;
@@ -592,6 +610,7 @@ namespace DSHShell
                 case HTMINBUTTON: WindowState = FormWindowState.Minimized; break;
                 case HTMAXBUTTON: ToggleMaximize(); break;
                 case HTCLOSE: Close(); break;   // 走 OnFormClosing → 收到托盘，和 Alt+F4 行为一致
+                case HTOBJECT: OpenSettings(); break;
             }
         }
 
@@ -602,6 +621,7 @@ namespace DSHShell
             var menu = new ContextMenuStrip();
             menu.Items.Add("显示 DeepSeek Harness", null, (sender, e) => ShowFromTray());
             menu.Items.Add("在浏览器中打开", null, (sender, e) => OpenInBrowser());
+            menu.Items.Add("设置…", null, (sender, e) => OpenSettings());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (sender, e) => ReallyExit());
 
@@ -650,6 +670,66 @@ namespace DSHShell
             Close();
         }
 
+        // ---------- 设置 ----------
+
+        /// <summary>
+        /// 打开设置对话框。启动方式只在启动时读一次，所以这里改完不做热切换，只提示重启。
+        /// </summary>
+        private void OpenSettings()
+        {
+            if (_settingsOpen) return;   // 网页按钮与原生命中区可能同时投递，别开出两个框
+            _settingsOpen = true;
+            try
+            {
+                ShowSettingsDialog();
+            }
+            catch (Exception ex)
+            {
+                // 调用方是网页消息回调，那边会吞异常；这里不自己报就是点了毫无反应
+                MessageBox.Show(this, "打不开设置：\r\n\r\n" + ex.Message,
+                    AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _settingsOpen = false;
+            }
+        }
+
+        private void ShowSettingsDialog()
+        {
+            // 可能是从托盘菜单进来的：先把窗口露出来，模态框才有归属，不会藏到别的窗口后面
+            if (!Visible) ShowFromTray();
+
+            using (var dialog = new SettingsForm(_settings, _dark))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                if (dialog.Result.SameAs(_settings)) return;
+
+                _settings.LaunchMode = dialog.Result.LaunchMode;
+                _settings.WslDistro = dialog.Result.WslDistro;
+                if (!_settings.Save())
+                {
+                    MessageBox.Show(this,
+                        "设置没能写入 " + ServerManager.DataDir + "，改动只在本次运行内有效。",
+                        AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var answer = MessageBox.Show(this,
+                    "启动方式已保存，重启 " + AppTitle + " 后生效。\r\n\r\n现在就重启吗？（正在进行的任务会终止）",
+                    AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (answer == DialogResult.Yes) RestartApp();
+            }
+        }
+
+        /// <summary>关掉自己并让 Program 在互斥体释放后拉起新实例（后台服务照常回收）。</summary>
+        private void RestartApp()
+        {
+            RestartRequested = true;
+            _reallyExit = true;
+            Close();
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             SaveWindowBounds();
@@ -666,7 +746,10 @@ namespace DSHShell
         {
             _tray.Visible = false;
             _tray.Dispose();
+            var startedByUs = _server.StartedByUs;
             _server.Stop(); // 只收掉本程序启动的服务
+            // 重启时多等一下端口真正关掉：新实例探到还没咽气的旧服务就会连上一个即将消失的后端
+            if (RestartRequested && startedByUs) _server.WaitForPortClosed(TimeSpan.FromSeconds(5));
             base.OnFormClosed(e);
         }
 
@@ -674,7 +757,7 @@ namespace DSHShell
 
         private static Panel BuildSplash(out Label status)
         {
-            var panel = new Panel { Dock = DockStyle.Fill, BackColor = LightBg };
+            var panel = new Panel { Dock = DockStyle.Fill, BackColor = Theme.LightBg };
             var table = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -703,7 +786,7 @@ namespace DSHShell
                 AutoSize = true,
                 Anchor = AnchorStyles.None,
                 Font = new Font("Segoe UI", 18f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(15, 17, 21)   // --dsw-alias-label-primary (light)
+                ForeColor = Theme.LightLabel
             };
             status = new Label
             {
@@ -713,7 +796,7 @@ namespace DSHShell
                 Anchor = AnchorStyles.None,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Font = new Font("Segoe UI", 9.5f),
-                ForeColor = Color.FromArgb(129, 133, 140) // --dsw-alias-label-tertiary (light)
+                ForeColor = Theme.LightLabelTertiary
             };
             var bar = new ProgressBar
             {

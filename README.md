@@ -10,7 +10,9 @@
 - Windows 10/11 x64
 - [.NET 6 桌面运行时](https://dotnet.microsoft.com/download/dotnet/6.0)（若未安装，首次运行会提示下载）
 - [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Windows 11 自带）
-- 已全局安装 dsh：`npm install -g @deepseek-ai/dsh`
+- 已安装 dsh，二选一：
+  - Windows 侧：`npm install -g @deepseek-ai/dsh`
+  - 或 WSL 侧：在发行版里装好 Node 与 dsh，然后在设置里把启动方式切到 WSL（见[后端启动方式](#后端启动方式windows--wsl)）
 
 ## 用法
 
@@ -19,18 +21,48 @@
 | 双击 `DSH.exe` | 静默启动后台服务（无任何黑色窗口）→ 弹出应用窗口 |
 | 窗口外观 | 网页表面延伸到窗口顶边（无独立白色顶栏），四角圆角 |
 | 拖动窗口 | 按住页面顶部 32px 的空白区域；页面内容会自动避开这条拖拽带 |
-| 窗口按钮 | 右上角原生风格的 ─ ❐ ✕，悬停着色并跟随页面浅色/深色主题 |
+| 窗口按钮 | 右上角原生风格的 ⚙ ─ ❐ ✕，悬停着色并跟随页面浅色/深色主题 |
 | ✕ / ❐ / ─ | ✕ 最小化到托盘（任务继续运行）/ ❐ 最大化·还原 / ─ 最小化到任务栏 |
+| ⚙ | 打开设置：选择后台 `dsh web` 跑在 Windows 还是 WSL 里 |
 | 双击托盘鲸鱼图标 | 重新打开窗口 |
-| 托盘图标 → 右键 | 显示窗口 / 在浏览器中打开 / 退出 |
+| 托盘图标 → 右键 | 显示窗口 / 在浏览器中打开 / 设置 / 退出 |
 | 托盘右键 → 退出 | 直接完全退出：连它自己拉起的后台服务一起关掉（正在进行的任务会终止） |
 
 托盘提示只在整个生命周期弹一次（跨启动记忆）。
 
+## 后端启动方式（Windows / WSL）
+
+标题栏 ⚙（或托盘右键 → 设置）里可以选后台 `dsh web` 在哪儿跑，对话框底部实时显示将要执行的命令：
+
+| 启动方式 | 实际执行 |
+|---|---|
+| Windows（PowerShell / cmd） | `cmd /s /c "<PATH 里的 dsh> web --no-open --host 127.0.0.1 --port 3080"` |
+| WSL（适用于 Linux 的 Windows 子系统） | `wsl -d <发行版> --cd ~ -e /bin/bash -lic "exec dsh web --no-open --host 127.0.0.1 --port 3080"` |
+
+两种方式都会加 `--no-open`：新版 `dsh web` 默认会拉起系统默认浏览器，而本程序用内嵌 WebView2，
+不需要再另开浏览器。
+
+改完点确定会提示需要重启，可以选择立即重启（程序自己拉起新实例，旧的后台服务照常回收）。
+设置存在 `%LOCALAPPDATA%\DeepSeekHarness\settings.json`。
+
+WSL 侧的几点说明：
+
+- **发行版下拉框**列出 `wsl -l -q` 的结果（Docker Desktop 的工具发行版会滤掉），选“默认发行版”就用 WSL 的默认项。
+- **需要 Node 20+ 与装在该发行版里的 dsh**（`npm install -g @deepseek-ai/dsh`）。Node 18 会直接报
+  `node:util does not provide an export named 'parseEnv'`。
+- **用登录 + 交互式 shell 启动**（`bash -lic`），所以 nvm 之类只写在 `~/.bashrc` 里的 PATH 也认。
+- **服务绑在 WSL 的 127.0.0.1**，Windows 侧靠 WSL 自带的 localhost 转发访问，不往 `0.0.0.0` 上绑，
+  端口不会暴露到网络上。若一直等不到服务就绪，检查 `%USERPROFILE%\.wslconfig` 里的 `localhostForwarding`。
+- **工作目录是 Linux 侧的用户主目录**（`--cd ~`），不是 `/mnt/c/...`：dsh 会拿工作目录当项目根，
+  而且跨文件系统访问很慢。
+- 退出时按进程树回收 `wsl.exe`，WSL 里的 dsh 会跟着结束。
+
+启动失败时（例如 dsh 其实装在另一边），错误框会直接问你要不要打开设置换一种方式。
+
 ## 设计要点
 
 - **无终端**：后台 `dsh web` 以完全隐藏的方式运行（`CreateNoWindow`），stdout/stderr 写入日志
-  `%LOCALAPPDATA%\DeepSeekHarness\dsh-web.log`。
+  `%LOCALAPPDATA%\DeepSeekHarness\dsh-web.log`，日志第一行就是这次用的启动命令。
 - **端口复用，绝不误杀**：若 3080 端口已有服务在跑（比如你自己在终端里跑的 `dsh web`），
   程序直接复用，不会重复启动；退出时也**不会**去关它。
 - **单实例**：程序已运行时再双击图标，只会把已有窗口唤到前台。
@@ -46,7 +78,7 @@
 npm install -g @deepseek-ai/dsh@latest
 ```
 
-壳程序每次启动都从 PATH 重新解析 `dsh` 命令，更新 dsh 后无需重新安装本程序。
+壳程序每次启动都从 PATH 重新解析 `dsh` 命令（WSL 方式则每次都在登录 shell 里重新解析），更新 dsh 后无需重新安装本程序。
 
 ## 从源码构建
 
