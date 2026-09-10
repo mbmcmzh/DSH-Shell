@@ -17,6 +17,9 @@ jobs:
         with:
           dotnet-version: "6.0.x"
 
+      - name: Test web authentication compatibility
+        run: dotnet run --project Tests/DSH-Shell.Tests.csproj
+
       - name: Publish single-file exe
         run: dotnet publish DSH-Shell.csproj -c Release -o publish
 
@@ -24,4 +27,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: publish/DSH.exe
+          body_path: .github/release-notes/${{ github.ref_name }}.md
           generate_release_notes: true

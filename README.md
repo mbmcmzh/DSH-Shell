@@ -42,6 +42,14 @@
 两种方式都会加 `--no-open`：新版 `dsh web` 默认会拉起系统默认浏览器，而本程序用内嵌 WebView2，
 不需要再另开浏览器。
 
+新版 dsh 会输出带 `?token=...` 的启动地址。壳会自动读取该地址，等待认证入口就绪后再加载窗口；
+托盘的“在浏览器中打开”也使用同一入口。认证完成后由 dsh 设置 cookie 并跳转到干净的首页地址。
+Windows 与 WSL 启动方式均支持，也兼容无需认证的旧版 dsh。
+
+如果复用已经运行的服务，壳会尝试从已有日志恢复入口，并向当前服务验证它是否仍然有效。
+若没有可用入口且窗口没有认证 cookie，会提示粘贴该服务启动时 `dsh web:` 后的完整地址。
+启动 token 不会额外写入设置；现有 `dsh-web.log` 包含 dsh 的启动输出，分享日志前请遮盖 token。
+
 改完点确定会提示需要重启，可以选择立即重启（程序自己拉起新实例，旧的后台服务照常回收）。
 设置存在 `%LOCALAPPDATA%\DeepSeekHarness\settings.json`。
 
@@ -87,6 +95,14 @@ dotnet publish DSH-Shell.csproj -c Release -o publish
 ```
 
 产物为单文件 `publish\DSH.exe`。可为它创建快捷方式放到桌面/开始菜单，右键可“固定到任务栏”。
+
+认证兼容回归验证（无需额外测试包）：
+
+```powershell
+dotnet run --project Tests/DSH-Shell.Tests.csproj
+# 可选：使用 PATH 中的真实 dsh，以临时 DSH_HOME 和独立端口验证认证及退出流程
+dotnet run --project Tests/DSH-Shell.Tests.csproj -- --real
+```
 
 图标由 `IconRender` 小工具从官方 favicon.svg 重新生成：
 

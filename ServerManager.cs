@@ -5,6 +5,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace DSHShell
 {
@@ -23,6 +24,7 @@ namespace DSHShell
         private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private readonly AppSettings _settings;
+        private readonly DshWebAddress _webAddress = new DshWebAddress(Port);
         private Process _proc;
         private StreamWriter _log;
         private string _commandLine = string.Empty;
@@ -36,6 +38,13 @@ namespace DSHShell
 
         /// <summary>本次会话使用的启动方式（设置改动要重启才生效，所以这里读一次就够）。</summary>
         public LaunchMode Mode => _settings.LaunchMode;
+
+        /// <summary>当前服务的完整入口，可能包含本次启动的认证 token。</summary>
+        public string WebUrl => _webAddress.Url;
+
+        public Task ResolveWebUrlAsync() => _webAddress.ResolveAsync(StartedByUs, LogFilePath);
+
+        public bool TrySetWebUrl(string url) => _webAddress.TrySet(url);
 
         /// <summary>服务端口；默认 3080，可用环境变量 DSH_SHELL_PORT 覆盖（仅测试用）。</summary>
         public static int Port { get; } = int.TryParse(Environment.GetEnvironmentVariable("DSH_SHELL_PORT"), out var p) ? p : DefaultPort;
@@ -253,6 +262,7 @@ namespace DSHShell
         private void Capture(string line)
         {
             if (line == null) return;
+            _webAddress.Capture(line);
             // stdout 与 stderr 的回调在不同线程上，写日志和攒尾巴都要串起来
             lock (_tail)
             {

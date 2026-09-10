@@ -13,15 +13,15 @@
     <Product>DeepSeek Harness Desktop</Product>
     <Description>DeepSeek Harness 桌面外壳：双击启动，窗口内使用，托盘常驻。</Description>
     <Company>DeepSeek Harness</Company>
-    <Version>1.1.0</Version>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <FileVersion>1.1.1.0</FileVersion>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <!-- 排除项目目录内的辅助工具与产物，避免被误编入或复制进发布目录 -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);IconRender\**;publish\**;packages\**;*.ps1</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);IconRender\**;Tests\**;publish\**;packages\**;*.ps1</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

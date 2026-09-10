@@ -47,7 +47,7 @@ namespace DSHShell
         /// <summary>右上角按钮个数：设置 ─ ❐ ✕（注入脚本里的 captionButtons 必须与之一致）。</summary>
         private const int CaptionButtonCount = 4;
 
-        private string WebUrl => $"http://127.0.0.1:{ServerManager.Port}/";
+        private string WebUrl => _server.WebUrl;
         private const string AppTitle = "DeepSeek Harness";
 
         private readonly string[] _args;
@@ -113,6 +113,8 @@ namespace DSHShell
             try
             {
                 await StartServerAsync();
+                SetSplash("正在获取后台服务的网页入口…");
+                await _server.ResolveWebUrlAsync();
                 await InitWebViewAsync();
                 HandleArgs();
             }
@@ -244,10 +246,52 @@ namespace DSHShell
             _webView.NavigationCompleted += (sender, args) =>
             {
                 HideSplash();
+                if (args.HttpStatusCode == 401 && !_testMode)
+                {
+                    // WebView2 回调内不能直接打开模态对话框，先退出回调再进入消息循环。
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (!IsDisposed && !_reallyExit) PromptForWebUrl();
+                    }));
+                    return;
+                }
                 PublishWindowState();
             };
 
             _webView.Source = new Uri(WebUrl);
+        }
+
+        private void PromptForWebUrl()
+        {
+            using var dialog = new Form
+            {
+                Text = "连接 dsh 后台服务", ClientSize = new Size(580, 180),
+                StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = false
+            };
+            var message = new Label
+            {
+                Text = "当前服务需要认证。请从启动它的终端复制 dsh web: 后的完整地址（含 ?token=...）。\r\n" +
+                       "也可以先退出该服务，再重新启动本程序，由本程序自动连接。",
+                Location = new Point(16, 16), Size = new Size(548, 60)
+            };
+            var input = new TextBox { Location = new Point(16, 80), Width = 548 };
+            var connect = new Button { Text = "连接", Location = new Point(388, 130), Width = 80 };
+            var cancel = new Button { Text = "取消", Location = new Point(484, 130), Width = 80, DialogResult = DialogResult.Cancel };
+            connect.Click += (sender, args) =>
+            {
+                if (!_server.TrySetWebUrl(input.Text))
+                {
+                    message.Text = $"请输入本机端口 {ServerManager.Port} 的完整 dsh 地址，例如：\r\nhttp://127.0.0.1:{ServerManager.Port}/?token=...";
+                    return;
+                }
+                dialog.DialogResult = DialogResult.OK;
+            };
+            dialog.Controls.AddRange(new Control[] { message, input, connect, cancel });
+            dialog.AcceptButton = connect;
+            dialog.CancelButton = cancel;
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+                _webView.CoreWebView2.Navigate(WebUrl);
         }
 
         /// <summary>初始化 WebView2，带 45 秒超时保护（任何环境下都不允许无限挂起）。</summary>
